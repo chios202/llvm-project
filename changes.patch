@@ -1,0 +1,684 @@
+diff --git a/mlir/include/mlir/Query/Matcher/ExtraMatchers.h b/mlir/include/mlir/Query/Matcher/ExtraMatchers.h
+new file mode 100644
+index 000000000000..2a3c310c9db9
+--- /dev/null
++++ b/mlir/include/mlir/Query/Matcher/ExtraMatchers.h
+@@ -0,0 +1,119 @@
++//===- Matchers.h - Various common matchers ---------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// This file provides extra matchers that are very useful for mlir-query
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef MLIR_IR_EXTRAMATCHERS_H
++#define MLIR_IR_EXTRAMATCHERS_H
++
++#include "MatchFinder.h"
++#include "MatchedOpSet.h"
++#include "MatchersInternal.h"
++
++namespace mlir {
++
++namespace query {
++
++namespace extramatcher {
++
++namespace detail {
++
++class DefinitionsMatcher : public matcher::DynMatcher {
++public:
++  enum class MatcherType { DefinedBy, GetDefinitions, GetAllDefinitions };
++  DefinitionsMatcher(matcher::DynMatcher &&innerMatcher, unsigned hops,
++                     MatcherType type)
++      : innerMatcher(std::move(innerMatcher)), hops(hops), type(type) {}
++
++private:
++  llvm::StringRef getID() const;
++  bool matches(Operation *op, [[maybe_unused]] matcher::MatchFinder &Finder,
++               [[maybe_unused]] matcher::BoundOperations &Bound,
++               unsigned tempHops) {
++    tempStorage.push_back({op, tempHops});
++    while (!tempStorage.empty()) {
++      auto [currentOp, tempHops] = tempStorage.pop_back_val();
++
++      if (prevOperations.count(currentOp)) {
++        continue;
++      }
++
++      prevOperations.insert(currentOp);
++      if (tempHops == 0) {
++        continue;
++      }
++
++      for (auto operand : currentOp->getOperands()) {
++        if (auto definingOp = operand.getDefiningOp()) {
++          tempStorage.push_back({definingOp, tempHops - 1});
++        }
++      }
++    }
++
++    // Need at least 1 defining op
++    return prevOperations.size() >= 2;
++  }
++
++public:
++  bool match(Operation *op, matcher::MatchFinder &Finder,
++             matcher::BoundOperations &Bound) {
++    tempStorage.clear();
++    prevOperations.clear();
++
++    if (innerMatcher.match(op) && matches(op, Finder, Bound, hops)) {
++      for (auto operations : prevOperations) {
++            }
++    }
++  }
++
++private:
++  llvm::SmallVector<std::pair<Operation *, size_t>, 4> tempStorage;
++  llvm::DenseSet<Operation *> prevOperations;
++  matcher::DynMatcher innerMatcher;
++  unsigned hops;
++  MatcherType type;
++};
++
++llvm::StringRef DefinitionsMatcher::getID() const {
++  switch (type) {
++  case MatcherType::DefinedBy:
++    return "definedBy";
++  case MatcherType::GetDefinitions:
++    return "getDefinitions";
++  case MatcherType::GetAllDefinitions:
++    return "getAllDefinitions";
++  }
++  llvm_unreachable("Unknown MatcherType");
++}
++
++} // namespace detail
++
++inline detail::DefinitionsMatcher
++definedBy(mlir::query::matcher::DynMatcher innerMatcher) {
++  return detail::DefinitionsMatcher(
++      std::move(innerMatcher), 1,
++      detail::DefinitionsMatcher::MatcherType::DefinedBy);
++}
++
++inline detail::DefinitionsMatcher
++getDefinitions(mlir::query::matcher::DynMatcher innerMatcher, unsigned hops) {
++  assert(hops > 0 && "hops must be >= 1");
++  return detail::DefinitionsMatcher(
++      std::move(innerMatcher), hops,
++      detail::DefinitionsMatcher::MatcherType::GetDefinitions);
++}
++
++} // namespace extramatcher
++
++} // namespace query
++
++} // namespace mlir
++
++#endif // MLIR_IR_EXTRAMATCHERS_H
+\ No newline at end of file
+diff --git a/mlir/include/mlir/Query/Matcher/Marshallers.h b/mlir/include/mlir/Query/Matcher/Marshallers.h
+index 6ed35ac0ddcc..33a718916826 100644
+--- a/mlir/include/mlir/Query/Matcher/Marshallers.h
++++ b/mlir/include/mlir/Query/Matcher/Marshallers.h
+@@ -50,6 +50,21 @@ struct ArgTypeTraits<llvm::StringRef> {
+   }
+ };
+ 
++template <>
++struct ArgTypeTraits<unsigned> {
++  static bool hasCorrectType(const VariantValue &value) {
++    return value.isUnsigned();
++  }
++
++  static unsigned get(const VariantValue &value) { return value.getUnsigned(); }
++
++  static ArgKind getKind() { return ArgKind::Unsigned; }
++
++  static std::optional<std::string> getBestGuess(const VariantValue &) {
++    return std::nullopt;
++  }
++};
++
+ template <>
+ struct ArgTypeTraits<DynMatcher> {
+ 
+@@ -166,7 +181,7 @@ matcherMarshallFixedImpl(void (*matcherFunc)(), llvm::StringRef matcherName,
+     ReturnType fnPointer = reinterpret_cast<FuncType>(matcherFunc)(
+         ArgTypeTraits<ArgTypes>::get(args[Is].value)...);
+     return VariantMatcher::SingleMatcher(
+-        *DynMatcher::constructDynMatcherFromMatcherFn(fnPointer));
++        *DynMatcher::constructDynMatcherFromMatcherFn(fnPointer,matcherName));
+   }
+ 
+   return VariantMatcher();
+diff --git a/mlir/include/mlir/Query/Matcher/MatchFinder.h b/mlir/include/mlir/Query/Matcher/MatchFinder.h
+index b008a21f53ae..06be65dbc8e1 100644
+--- a/mlir/include/mlir/Query/Matcher/MatchFinder.h
++++ b/mlir/include/mlir/Query/Matcher/MatchFinder.h
+@@ -15,6 +15,7 @@
+ #define MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHERFINDER_H
+ 
+ #include "MatchersInternal.h"
++#include "mlir/IR/Operation.h"
+ 
+ namespace mlir::query::matcher {
+ 
+@@ -24,16 +25,48 @@ public:
+   // Returns all operations that match the given matcher.
+   static std::vector<Operation *> getMatches(Operation *root,
+                                              DynMatcher matcher) {
++
+     std::vector<Operation *> matches;
+ 
+     // Simple match finding with walk.
++    MatchFinder finder;
++    BoundOperations operations;
+     root->walk([&](Operation *subOp) {
+-      if (matcher.match(subOp))
++      if (matcher.match(subOp, finder, operations))
+         matches.push_back(subOp);
+     });
+ 
+     return matches;
+   }
++
++public:
++  class MatchCallback {
++  public:
++    virtual ~MatchCallback() = default;
++    virtual void run(Operation *op) = 0;
++  };
++
++  void addMatcher(std::unique_ptr<DynMatcher> Matcher,
++                  std::unique_ptr<MatchCallback> Callback) {
++    matchers.emplace_back(std::move(Matcher), std::move(Callback));
++  }
++
++private:
++  using MatcherCallbackPair =
++      std::pair<std::unique_ptr<DynMatcher>, std::unique_ptr<MatchCallback>>;
++  std::vector<MatcherCallbackPair> matchers;
++};
++
++class CollectMatchesCallback : public MatchFinder::MatchCallback {
++public:
++  void run(Operation *op) override { matchedOperations.push_back(op); }
++
++  llvm::SmallVector<Operation *, 4> retrieveMatches() {
++    return matchedOperations;
++  }
++
++private:
++  llvm::SmallVector<Operation *, 4> matchedOperations;
+ };
+ 
+ } // namespace mlir::query::matcher
+diff --git a/mlir/include/mlir/Query/Matcher/MatchedOpSet.h b/mlir/include/mlir/Query/Matcher/MatchedOpSet.h
+new file mode 100644
+index 000000000000..79f20378a2a7
+--- /dev/null
++++ b/mlir/include/mlir/Query/Matcher/MatchedOpSet.h
+@@ -0,0 +1,26 @@
++#ifndef MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHEDOPSET_H
++#define MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHEDOPSET_H
++
++#include "mlir/IR/Operation.h"
++#include "llvm/ADT/ArrayRef.h"
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/ADT/StringMap.h"
++
++namespace mlir::query::matcher {
++
++class BoundOperations {
++public:
++  void bind(llvm::StringRef id, llvm::ArrayRef<Operation *> ops) {
++    boundOperations[id] =
++        llvm::SmallVector<Operation *, 4>(ops.begin(), ops.end());
++  }
++
++private:
++  using BoundOperationsContainer =
++      llvm::StringMap<llvm::SmallVector<Operation *, 4>>;
++  BoundOperationsContainer boundOperations;
++};
++
++} // namespace mlir::query::matcher
++
++#endif // MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHEDOPSET_H
+diff --git a/mlir/include/mlir/Query/Matcher/MatchersInternal.h b/mlir/include/mlir/Query/Matcher/MatchersInternal.h
+index 117f7d4edef9..786c3d6ceed4 100644
+--- a/mlir/include/mlir/Query/Matcher/MatchersInternal.h
++++ b/mlir/include/mlir/Query/Matcher/MatchersInternal.h
+@@ -22,9 +22,13 @@
+ 
+ #include "mlir/IR/Matchers.h"
+ #include "llvm/ADT/IntrusiveRefCntPtr.h"
++#include <type_traits>
+ 
+ namespace mlir::query::matcher {
+ 
++class MatchFinder;
++class BoundOperations;
++
+ // Generic interface for matchers on an MLIR operation.
+ class MatcherInterface
+     : public llvm::ThreadSafeRefCountedBase<MatcherInterface> {
+@@ -32,6 +36,8 @@ public:
+   virtual ~MatcherInterface() = default;
+ 
+   virtual bool match(Operation *op) = 0;
++  virtual bool match(Operation *op, MatchFinder &Finder,
++                     BoundOperations &Bound) = 0;
+ };
+ 
+ // MatcherFnImpl takes a matcher function object and implements
+@@ -40,40 +46,66 @@ template <typename MatcherFn>
+ class MatcherFnImpl : public MatcherInterface {
+ public:
+   MatcherFnImpl(MatcherFn &matcherFn) : matcherFn(matcherFn) {}
+-  bool match(Operation *op) override { return matcherFn.match(op); }
++
++  // SFINAE for match(Operation*)
++  template <typename T>
++  auto match(Operation *op) -> decltype(std::declval<T>().match(op), bool()) {
++    return matcherFn.match(op);
++  }
++
++  // Fallback if no match function with only Operation* is found
++  bool match(Operation *op) override { return false; }
++
++  // SFINAE for match(Operation*, MatchFinder&, BoundOperations&)
++  template <typename T>
++  auto match(Operation *op, MatchFinder &Finder, BoundOperations &Bound)
++      -> decltype(std::declval<T>().match(op, Finder, Bound), bool()) {
++    return matcherFn.match(op, Finder, Bound);
++  }
++
++  // Fallback if no match function with MatchFinder and BoundOperations is found
++  bool match(Operation *op, MatchFinder &Finder,
++             BoundOperations &Bound) override {
++    return false;
++  }
+ 
+ private:
+   MatcherFn matcherFn;
+ };
+ 
+-// Matcher wraps a MatcherInterface implementation and provides a match()
+-// method that redirects calls to the underlying implementation.
++// Matcher wraps a MatcherInterface implementation and provides match()
++// methods that redirect calls to the underlying implementation.
+ class DynMatcher {
+ public:
+   // Takes ownership of the provided implementation pointer.
+-  DynMatcher(MatcherInterface *implementation)
+-      : implementation(implementation) {}
++  DynMatcher(MatcherInterface *implementation, StringRef matcherName)
++      : implementation(implementation), matcherName(matcherName) {}
+ 
+   template <typename MatcherFn>
+   static std::unique_ptr<DynMatcher>
+-  constructDynMatcherFromMatcherFn(MatcherFn &matcherFn) {
++  constructDynMatcherFromMatcherFn(MatcherFn &matcherFn,
++                                   StringRef matcherName) {
+     auto impl = std::make_unique<MatcherFnImpl<MatcherFn>>(matcherFn);
+-    return std::make_unique<DynMatcher>(impl.release());
++    return std::make_unique<DynMatcher>(impl.release(), matcherName);
+   }
+ 
+   bool match(Operation *op) const { return implementation->match(op); }
+ 
+-  void setFunctionName(StringRef name) { functionName = name.str(); };
+-
+-  bool hasFunctionName() const { return !functionName.empty(); };
++  bool match(Operation *op, MatchFinder &Finder, BoundOperations &Bound) {
++    return implementation->match(op, Finder, Bound);
++  }
+ 
+-  StringRef getFunctionName() const { return functionName; };
++  void setFunctionName(StringRef name) { functionName = name.str(); }
++  bool hasFunctionName() const { return !functionName.empty(); }
++  StringRef getFunctionName() const { return functionName; }
++  StringRef getMatcherName() const { return matcherName; }
+ 
+ private:
+   llvm::IntrusiveRefCntPtr<MatcherInterface> implementation;
+   std::string functionName;
++  std::string matcherName;
+ };
+ 
+ } // namespace mlir::query::matcher
+ 
+-#endif // MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHERSINTERNAL_H
++#endif // MLIR_TOOLS_MLIRQUERY_MATCHER_MATCHERSINTERNAL_H
+\ No newline at end of file
+diff --git a/mlir/include/mlir/Query/Matcher/VariantValue.h b/mlir/include/mlir/Query/Matcher/VariantValue.h
+index 449f8b3a01e0..73d96a6913df 100644
+--- a/mlir/include/mlir/Query/Matcher/VariantValue.h
++++ b/mlir/include/mlir/Query/Matcher/VariantValue.h
+@@ -21,7 +21,7 @@
+ namespace mlir::query::matcher {
+ 
+ // All types that VariantValue can contain.
+-enum class ArgKind { Matcher, String };
++enum class ArgKind { Matcher, String, Unsigned };
+ 
+ // A variant matcher object to abstract simple and complex matchers into a
+ // single object type.
+@@ -81,6 +81,7 @@ public:
+   // Specific constructors for each supported type.
+   VariantValue(const llvm::StringRef string);
+   VariantValue(const VariantMatcher &matcher);
++  VariantValue(unsigned Unsigned);
+ 
+   // String value functions.
+   bool isString() const;
+@@ -92,6 +93,11 @@ public:
+   const VariantMatcher &getMatcher() const;
+   void setMatcher(const VariantMatcher &matcher);
+ 
++  // Unsigned value functions.
++  bool isUnsigned() const;
++  unsigned getUnsigned() const;
++  void setUnsigned(unsigned Unsigned);
++
+   // String representation of the type of the value.
+   std::string getTypeAsString() const;
+ 
+@@ -103,12 +109,14 @@ private:
+     Nothing,
+     String,
+     Matcher,
++    Unsigned,
+   };
+ 
+   // All supported value types.
+   union AllValues {
+     llvm::StringRef *String;
+     VariantMatcher *Matcher;
++    unsigned Unsigned;
+   };
+ 
+   ValueType type;
+diff --git a/mlir/lib/Query/Matcher/Parser.cpp b/mlir/lib/Query/Matcher/Parser.cpp
+index 3609e24f9939..4f1b716756e3 100644
+--- a/mlir/lib/Query/Matcher/Parser.cpp
++++ b/mlir/lib/Query/Matcher/Parser.cpp
+@@ -135,6 +135,18 @@ private:
+     case '\'':
+       consumeStringLiteral(&result);
+       break;
++    case '0':
++    case '1':
++    case '2':
++    case '3':
++    case '4':
++    case '5':
++    case '6':
++    case '7':
++    case '8':
++    case '9':
++      consumeNumberLiteral(&result);
++      break;
+     default:
+       parseIdentifierOrInvalid(&result);
+       break;
+@@ -144,6 +156,53 @@ private:
+     return result;
+   }
+ 
++  void consumeNumberLiteral(TokenInfo *result) {
++    bool isFloatingLiteral = false;
++    unsigned length = 1;
++    if (code.size() > 1) {
++      // Consume the 'x' or 'b' radix modifier, if present.
++      switch (tolower(code[1])) {
++      case 'x':
++      case 'b':
++        length = 2;
++      }
++    }
++    while (length < code.size() && isdigit(code[length]))
++      ++length;
++
++    // Try to recognize a floating point literal.
++    while (length < code.size()) {
++      char c = code[length];
++      if (c == '-' || c == '+' || c == '.' || isdigit(c)) {
++        isFloatingLiteral = true;
++        length++;
++      } else {
++        break;
++      }
++    }
++
++    result->text = code.take_front(length);
++    code = code.drop_front(length);
++
++    if (isFloatingLiteral) {
++      char *end;
++      errno = 0;
++      std::string text = result->text.str();
++      double doubleValue = strtod(text.c_str(), &end);
++      if (*end == 0 && errno == 0) {
++        result->kind = TokenKind::Literal;
++        result->value = doubleValue;
++        return;
++      }
++    } else {
++      unsigned value;
++      if (!result->text.getAsInteger(0, value)) {
++        result->kind = TokenKind::Literal;
++        result->value = value;
++        return;
++      }
++    }
++  }
+   // Consume a string literal, handle escape sequences and missing closing
+   // quote.
+   void consumeStringLiteral(TokenInfo *result) {
+diff --git a/mlir/lib/Query/Matcher/RegistryManager.cpp b/mlir/lib/Query/Matcher/RegistryManager.cpp
+index 8c9197f4d009..8901775f1dfd 100644
+--- a/mlir/lib/Query/Matcher/RegistryManager.cpp
++++ b/mlir/lib/Query/Matcher/RegistryManager.cpp
+@@ -31,6 +31,8 @@ static std::string asArgString(ArgKind kind) {
+     return "Matcher";
+   case ArgKind::String:
+     return "String";
++  case ArgKind::Unsigned:
++    return "unsigned";
+   }
+   llvm_unreachable("Unhandled ArgKind");
+ }
+diff --git a/mlir/lib/Query/Matcher/VariantValue.cpp b/mlir/lib/Query/Matcher/VariantValue.cpp
+index 65bd4bd77bcf..50d79512196d 100644
+--- a/mlir/lib/Query/Matcher/VariantValue.cpp
++++ b/mlir/lib/Query/Matcher/VariantValue.cpp
+@@ -56,6 +56,10 @@ VariantValue::VariantValue(const VariantMatcher &matcher)
+   value.Matcher = new VariantMatcher(matcher);
+ }
+ 
++VariantValue::VariantValue(unsigned Unsigned) : type(ValueType::Unsigned) {
++  value.Unsigned = Unsigned;
++}
++
+ VariantValue::~VariantValue() { reset(); }
+ 
+ VariantValue &VariantValue::operator=(const VariantValue &other) {
+@@ -69,6 +73,9 @@ VariantValue &VariantValue::operator=(const VariantValue &other) {
+   case ValueType::Matcher:
+     setMatcher(other.getMatcher());
+     break;
++  case ValueType::Unsigned:
++    setUnsigned(other.getUnsigned());
++    break;
+   case ValueType::Nothing:
+     type = ValueType::Nothing;
+     break;
+@@ -85,12 +92,26 @@ void VariantValue::reset() {
+     delete value.Matcher;
+     break;
+   // Cases that do nothing.
++  case ValueType::Unsigned:
+   case ValueType::Nothing:
+     break;
+   }
+   type = ValueType::Nothing;
+ }
+ 
++bool VariantValue::isUnsigned() const { return type == ValueType::Unsigned; }
++
++unsigned VariantValue::getUnsigned() const {
++  assert(isUnsigned());
++  return value.Unsigned;
++}
++
++void VariantValue::setUnsigned(unsigned newValue) {
++  reset();
++  type = ValueType::Unsigned;
++  value.Unsigned = newValue;
++}
++
+ bool VariantValue::isString() const { return type == ValueType::String; }
+ 
+ const llvm::StringRef &VariantValue::getString() const {
+@@ -123,6 +144,8 @@ std::string VariantValue::getTypeAsString() const {
+     return "String";
+   case ValueType::Matcher:
+     return "Matcher";
++  case ValueType::Unsigned:
++    return "Unsigned";
+   case ValueType::Nothing:
+     return "Nothing";
+   }
+diff --git a/mlir/test/mlir-query/function-extraction.mlir b/mlir/test/mlir-query/function-extraction.mlir
+index a783f65c6761..5ccdb877397d 100644
+--- a/mlir/test/mlir-query/function-extraction.mlir
++++ b/mlir/test/mlir-query/function-extraction.mlir
+@@ -6,14 +6,23 @@
+ // CHECK:       %[[MUL2:.*]] = arith.mulf {{.*}} : f32
+ // CHECK-NEXT:  return %[[MUL0]], %[[MUL1]], %[[MUL2]] : f32, f32, f32
+ 
+-func.func @mixedOperations(%a: f32, %b: f32, %c: f32) -> f32 {
+-  %sum0 = arith.addf %a, %b : f32
+-  %sub0 = arith.subf %sum0, %c : f32
+-  %mul0 = arith.mulf %a, %sub0 : f32
+-  %sum1 = arith.addf %b, %c : f32
+-  %mul1 = arith.mulf %sum1, %mul0 : f32
+-  %sub2 = arith.subf %mul1, %a : f32
+-  %sum2 = arith.addf %mul1, %b : f32
+-  %mul2 = arith.mulf %sub2, %sum2 : f32
+-  return %mul2 : f32
++
++func.func @complexOperation(%x: f32, %y: f32, %z: f32) -> f32 {
++  // Arithmetic operations without any multiplication
++  %add1 = arith.addf %x, %y : f32
++  %sub1 = arith.subf %add1, %z : f32
++  %add2 = arith.addf %sub1, %y : f32
++  %sub2 = arith.subf %add2, %x : f32
++  %add3 = arith.addf %sub2, %z : f32
++
++  // Now %sub3 depends on both %add3 and %sub2, creating more complex def-use chain
++  %sub3 = arith.subf %add3, %sub2 : f32
++
++  // Final multiplication operation involving %sub3 and %sub2
++  %final_op = arith.mulf %sub3, %sub2 : f32
++
++  return %final_op : f32
+ }
++
++
++
+diff --git a/mlir/test/mlir-query/simple-test.mlir b/mlir/test/mlir-query/simple-test.mlir
+index a4d006598767..fbb7546b9cfe 100644
+--- a/mlir/test/mlir-query/simple-test.mlir
++++ b/mlir/test/mlir-query/simple-test.mlir
+@@ -8,9 +8,9 @@ func.func @simple1() {
+ 
+ // CHECK: {{.*}}.mlir:12:11: note: "root" binds here
+ // CHECK: {{.*}}.mlir:13:11: note: "root" binds here
+-func.func @simple2() {
++func.func @simple2() { getDefiniOp 
+   %cst1 = arith.constant 1.0 : f32
+   %cst2 = arith.constant 2.0 : f32
+-  %add = arith.addf %cst1, %cst2 : f32
++  %add = arith.  %cst1, %cst2 : f32
+   return
+ }
+diff --git a/mlir/tools/mlir-query/mlir-query.cpp b/mlir/tools/mlir-query/mlir-query.cpp
+index 0ed4f94d5802..58b08c7e7c1d 100644
+--- a/mlir/tools/mlir-query/mlir-query.cpp
++++ b/mlir/tools/mlir-query/mlir-query.cpp
+@@ -10,11 +10,12 @@
+ // of the registered queries.
+ //
+ //===----------------------------------------------------------------------===//
+-
+ #include "mlir/IR/Dialect.h"
+ #include "mlir/IR/MLIRContext.h"
+ #include "mlir/IR/Matchers.h"
+ #include "mlir/InitAllDialects.h"
++#include "mlir/Query/Matcher/ExtraMatchers.h"
++#include "mlir/Query/Matcher/MatchFinder.h"
+ #include "mlir/Query/Matcher/Registry.h"
+ #include "mlir/Tools/mlir-query/MlirQueryMain.h"
+ 
+@@ -34,25 +35,37 @@ void registerTestDialect(DialectRegistry &);
+ int main(int argc, char **argv) {
+ 
+   DialectRegistry dialectRegistry;
++  query::matcher::MatchFinder Finder;
+   registerAllDialects(dialectRegistry);
+ 
+   query::matcher::Registry matcherRegistry;
+ 
+   // Matchers registered in alphabetical order for consistency:
+-  matcherRegistry.registerMatcher("hasOpAttrName",
+-                                  static_cast<HasOpAttrName *>(m_Attr));
++  matcherRegistry.registerMatcher("getDefinitions",
++                                  mlir::query::extramatcher::getDefinitions);
++  matcherRegistry.registerMatcher("definedBy",
++                                  mlir::query::extramatcher::definedBy);
++  // matcherRegistry.registerMatcher("hasOpAttrName",
++  //                                 static_cast<HasOpAttrName *>(m_Attr));
+   matcherRegistry.registerMatcher("hasOpName", static_cast<HasOpName *>(m_Op));
+-  matcherRegistry.registerMatcher("isConstantOp",
+-                                  static_cast<IsConstantOp *>(m_Constant));
+-  matcherRegistry.registerMatcher("isNegInfFloat", m_NegInfFloat);
+-  matcherRegistry.registerMatcher("isNegZeroFloat", m_NegZeroFloat);
+-  matcherRegistry.registerMatcher("isNonZero", m_NonZero);
+-  matcherRegistry.registerMatcher("isOne", m_One);
+-  matcherRegistry.registerMatcher("isOneFloat", m_OneFloat);
+-  matcherRegistry.registerMatcher("isPosInfFloat", m_PosInfFloat);
+-  matcherRegistry.registerMatcher("isPosZeroFloat", m_PosZeroFloat);
+-  matcherRegistry.registerMatcher("isZero", m_Zero);
+-  matcherRegistry.registerMatcher("isZeroFloat", m_AnyZeroFloat);
++  // matcherRegistry.registerMatcher("isConstantOp",
++  //                                 static_cast<IsConstantOp *>(m_Constant));
++  // matcherRegistry.registerMatcher("isNegInfFloat", m_NegInfFloat);
++  // matcherRegistry.registerMatcher("isNegZeroFloat", m_NegZeroFloat);
++  // matcherRegistry.registerMatcher("isNonZero", m_NonZero);
++  // matcherRegistry.registerMatcher("isOne", m_One);
++  // matcherRegistry.registerMatcher("isOneFloat", m_OneFloat);
++  // matcherRegistry.registerMatcher("isPosInfFloat", m_PosInfFloat);
++  // matcherRegistry.registerMatcher("isPosZeroFloat", m_PosZeroFloat);
++  // matcherRegistry.registerMatcher("isZero", m_Zero);
++  // matcherRegistry.registerMatcher("isZeroFloat", m_AnyZeroFloat);
++
++  // Callbacks registered for certain matchers
++
++  Finder.addMatcher(
++      std::move(
++          std::make_unique<query::extramatcher::detail::DefinitionsMatcher>()),
++      std::move(std::make_unique<query::matcher::CollectMatchesCallback>()));
+ 
+ #ifdef MLIR_INCLUDE_TESTS
+   test::registerTestDialect(dialectRegistry);

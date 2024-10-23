@@ -6,14 +6,23 @@
 // CHECK:       %[[MUL2:.*]] = arith.mulf {{.*}} : f32
 // CHECK-NEXT:  return %[[MUL0]], %[[MUL1]], %[[MUL2]] : f32, f32, f32
 
-func.func @mixedOperations(%a: f32, %b: f32, %c: f32) -> f32 {
-  %sum0 = arith.addf %a, %b : f32
-  %sub0 = arith.subf %sum0, %c : f32
-  %mul0 = arith.mulf %a, %sub0 : f32
-  %sum1 = arith.addf %b, %c : f32
-  %mul1 = arith.mulf %sum1, %mul0 : f32
-  %sub2 = arith.subf %mul1, %a : f32
-  %sum2 = arith.addf %mul1, %b : f32
-  %mul2 = arith.mulf %sub2, %sum2 : f32
-  return %mul2 : f32
+
+func.func @complexOperation(%x: f32, %y: f32, %z: f32) -> f32 {
+  // Arithmetic operations without any multiplication
+  %add1 = arith.addf %x, %y : f32
+  %sub1 = arith.subf %add1, %z : f32
+  %add2 = arith.addf %sub1, %y : f32
+  %sub2 = arith.subf %add2, %x : f32
+  %add3 = arith.addf %sub2, %z : f32
+
+  // Now %sub3 depends on both %add3 and %sub2, creating more complex def-use chain
+  %sub3 = arith.subf %add3, %sub2 : f32
+
+  // Final multiplication operation involving %sub3 and %sub2
+  %final_op = arith.mulf %sub3, %sub2 : f32
+
+  return %final_op : f32
 }
+
+
+

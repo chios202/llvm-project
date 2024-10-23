@@ -127,22 +127,21 @@ LogicalResult QuitQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
 LogicalResult MatchQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
   Operation *rootOp = qs.getRootOp();
   int matchCount = 0;
-  std::vector<Operation *> matches =
-      matcher::MatchFinder().getMatches(rootOp, matcher);
+  auto matches = matcher::MatchFinder().getMatches(rootOp, matcher);
 
   // An extract call is recognized by considering if the matcher has a name.
   // TODO: Consider making the extract more explicit.
   if (matcher.hasFunctionName()) {
     auto functionName = matcher.getFunctionName();
-    Operation *function =
-        extractFunction(matches, rootOp->getContext(), functionName);
+    Operation *function = extractFunction(matches.getOperations(),
+                                          rootOp->getContext(), functionName);
     os << "\n" << *function << "\n\n";
     function->erase();
     return mlir::success();
   }
 
   os << "\n";
-  for (Operation *op : matches) {
+  for (Operation *op : matches.getOperations()) {
     os << "Match #" << ++matchCount << ":\n\n";
     // Placeholder "root" binding for the initial draft.
     printMatch(os, qs, op, "root");

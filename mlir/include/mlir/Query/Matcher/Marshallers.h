@@ -181,7 +181,7 @@ matcherMarshallFixedImpl(void (*matcherFunc)(), llvm::StringRef matcherName,
     ReturnType fnPointer = reinterpret_cast<FuncType>(matcherFunc)(
         ArgTypeTraits<ArgTypes>::get(args[Is].value)...);
     return VariantMatcher::SingleMatcher(
-        *DynMatcher::constructDynMatcherFromMatcherFn(fnPointer,matcherName));
+        *DynMatcher::constructDynMatcherFromMatcherFn(fnPointer, matcherName));
   }
 
   return VariantMatcher();

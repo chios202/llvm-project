@@ -23,18 +23,27 @@ namespace mlir::query::matcher {
 class MatchFinder {
 public:
   // Returns all operations that match the given matcher.
-  static BoundOperations getMatches(Operation *root, DynMatcher matcher) {
+  static BoundOperationsGraphBuilder getMatches(Operation *root,
+                                                DynMatcher matcher) {
 
     // Simple match finding with walk.
-    BoundOperations operations;
+    unsigned counter = 0;
+    Operation *currentOp;
+
+    BoundOperationsGraphBuilder Bound;
     root->walk([&](Operation *subOp) {
       if (matcher.match(subOp)) {
-        operations.bind(subOp);
-      } else if (matcher.match(subOp, operations)) {
-        operations.bind(subOp);
+        counter++;
+        currentOp = subOp;
+        matcher::BoundOperationNode *currentNode = Bound.addNode(currentOp);
+        if (counter > 0) {
+          Bound.addEdge(currentOp, subOp);
+        }
+      } else if (matcher.match(subOp, Bound)) {
+        ////
       }
     });
-    return operations;
+    return Bound;
   }
 };
 

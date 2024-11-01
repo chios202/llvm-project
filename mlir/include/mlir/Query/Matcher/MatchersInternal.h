@@ -1,13 +1,8 @@
 //===- MatchersInternal.h - Structural query framework ----------*- C++ -*-===//
 //
-// Implements the base layer of the matcher framework.
-//
-// Matchers are methods that return a Matcher which provides a method
-// match(Operation *op)
-//
-// The matcher functions are defined in include/mlir/IR/Matchers.h.
-// This file contains the wrapper classes needed to construct matchers for
-// mlir-query.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -20,80 +15,104 @@
 
 namespace mlir::query::matcher {
 
-class BoundOperations {
-public:
-  void bind(Operation *op) { operations.push_back(op); }
+struct BoundOperationNode {
+  Operation *op;
+  std::vector<BoundOperationNode *>
+      parents; // Operations that use this op as an operand
+  std::vector<BoundOperationNode *>
+      children; // Operations that are operands of this op
 
-  std::vector<Operation *> &getOperations() { return operations; }
+  BoundOperationNode(Operation *operation) : op(operation) {}
+};
+
+class BoundOperationsGraphBuilder {
+public:
+  // Adds a node to the graph or retrieves it if it already exists
+  BoundOperationNode *addNode(Operation *op) {
+    auto it = nodes.find(op);
+    if (it != nodes.end()) {
+      return it->second.get();
+    }
+    auto node = std::make_unique<BoundOperationNode>(op);
+    BoundOperationNode *nodePtr = node.get();
+    nodes[op] = std::move(node);
+    return nodePtr;
+  }
+
+  // Connects parent and child nodes
+  void addEdge(Operation *parentOp, Operation *childOp) {
+    BoundOperationNode *parentNode = addNode(parentOp);
+    BoundOperationNode *childNode = addNode(childOp);
+    parentNode->children.push_back(childNode);
+    childNode->parents.push_back(parentNode);
+  }
+
+  // Retrieves a node by Operation*
+  BoundOperationNode *getNode(Operation *op) const {
+    auto it = nodes.find(op);
+    return it != nodes.end() ? it->second.get() : nullptr;
+  }
+
+  // Access to all nodes
+  const std::unordered_map<Operation *, std::unique_ptr<BoundOperationNode>> &
+  getNodes() const {
+    return nodes;
+  }
 
 private:
-  std::vector<Operation *> operations;
+  // Maps operations to their corresponding nodes
+  std::unordered_map<Operation *, std::unique_ptr<BoundOperationNode>> nodes;
 };
+
+// Type trait to detect if a matcher has a match(Operation*) method
+template <typename T, typename = void>
+struct has_simple_match : std::false_type {};
+
+template <typename T>
+struct has_simple_match<T, std::void_t<decltype(std::declval<T>().match(
+                               std::declval<Operation *>()))>>
+    : std::true_type {};
+
+// Type trait to detect if a matcher has a match(Operation*, BoundOperationsGraphBuilder&)
+// method
+template <typename T, typename = void>
+struct has_bound_match : std::false_type {};
+
+template <typename T>
+struct has_bound_match<
+    T, std::void_t<decltype(std::declval<T>().match(
+           std::declval<Operation *>(), std::declval<BoundOperationsGraphBuilder &>()))>>
+    : std::true_type {};
 
 // Generic interface for matchers on an MLIR operation.
 class MatcherInterface
     : public llvm::ThreadSafeRefCountedBase<MatcherInterface> {
 public:
   virtual ~MatcherInterface() = default;
-
   virtual bool match(Operation *op) = 0;
-  virtual bool match(Operation *op, BoundOperations &Bound) = 0;
+  virtual bool match(Operation *op, BoundOperationsGraphBuilder &bound) = 0;
 };
-
-// Helper traits to detect if MatcherFn has certain match methods.
-namespace matcher_detail {
-
-template <typename T, typename = void>
-struct has_match_op : std::false_type {};
-
-template <typename T>
-struct has_match_op<T, std::void_t<decltype(std::declval<T &>().match(
-                           std::declval<Operation *>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_match_op_bound : std::false_type {};
-
-template <typename T>
-struct has_match_op_bound<
-    T, std::void_t<decltype(std::declval<T &>().match(
-           std::declval<Operation *>(), std::declval<BoundOperations &>()))>>
-    : std::true_type {};
-
-} // namespace matcher_detail
 
 // MatcherFnImpl takes a matcher function object and implements
 // MatcherInterface.
 template <typename MatcherFn>
 class MatcherFnImpl : public MatcherInterface {
 public:
-  MatcherFnImpl(MatcherFn matcherFn) : matcherFn(std::move(matcherFn)) {}
+  MatcherFnImpl(MatcherFn &matcherFn) : matcherFn(matcherFn) {}
 
-  bool match(Operation *op) override { return match_impl(op); }
+  bool match(Operation *op) override {
+    if constexpr (has_simple_match<MatcherFn>::value)
+      return matcherFn.match(op);
+    return false;
+  }
 
-  bool match(Operation *op, BoundOperations &Bound) override {
-    return match_impl(op, Bound);
+  bool match(Operation *op, BoundOperationsGraphBuilder &bound) override {
+    if constexpr (has_bound_match<MatcherFn>::value)
+      return matcherFn.match(op, bound);
+    return false;
   }
 
 private:
-  bool match_impl(Operation *op) {
-    if constexpr (matcher_detail::has_match_op<MatcherFn>::value) {
-      return matcherFn.match(op);
-    } else if constexpr (matcher_detail::has_match_op_bound<MatcherFn>::value) {
-      BoundOperations Bound;
-      return matcherFn.match(op, Bound);
-    }
-    // No fallback needed; one of the match methods must be available.
-  }
-
-  bool match_impl(Operation *op, BoundOperations &Bound) {
-    if constexpr (matcher_detail::has_match_op_bound<MatcherFn>::value) {
-      return matcherFn.match(op, Bound);
-    } else if constexpr (matcher_detail::has_match_op<MatcherFn>::value) {
-      return matcherFn.match(op);
-    }
-    // No fallback needed; one of the match methods must be available.
-  }
-
   MatcherFn matcherFn;
 };
 
@@ -103,31 +122,31 @@ class DynMatcher {
 public:
   // Takes ownership of the provided implementation pointer.
   DynMatcher(MatcherInterface *implementation, StringRef matcherName)
-      : implementation(implementation), matcherName(matcherName) {}
+      : implementation(implementation), matcherName(matcherName.str()) {}
 
   template <typename MatcherFn>
   static std::unique_ptr<DynMatcher>
   constructDynMatcherFromMatcherFn(MatcherFn &matcherFn,
                                    StringRef matcherName) {
-    auto impl = new MatcherFnImpl<MatcherFn>(matcherFn);
-    return std::make_unique<DynMatcher>(impl, matcherName);
+    auto impl = std::make_unique<MatcherFnImpl<MatcherFn>>(matcherFn);
+    return std::make_unique<DynMatcher>(impl.release(), matcherName);
   }
 
-  bool match(Operation *op) { return implementation->match(op); }
-
-  bool match(Operation *op, BoundOperations &Bound) {
-    return implementation->match(op, Bound);
+  bool match(Operation *op) const { return implementation->match(op); }
+  bool match(Operation *op, BoundOperationsGraphBuilder &bound) const {
+    return implementation->match(op, bound);
   }
 
   void setFunctionName(StringRef name) { functionName = name.str(); }
+  void setMatcherName(StringRef name) { matcherName = name.str(); }
   bool hasFunctionName() const { return !functionName.empty(); }
   StringRef getFunctionName() const { return functionName; }
   StringRef getMatcherName() const { return matcherName; }
 
 private:
   llvm::IntrusiveRefCntPtr<MatcherInterface> implementation;
-  std::string functionName;
   std::string matcherName;
+  std::string functionName;
 };
 
 } // namespace mlir::query::matcher

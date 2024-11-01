@@ -14,6 +14,8 @@
 #include "mlir/Query/QuerySession.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include <unordered_map>
+#include <unordered_set>
 
 namespace mlir::query {
 
@@ -124,6 +126,56 @@ LogicalResult QuitQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
   return mlir::success();
 }
 
+// Existing includes and namespaces...
+
+void printAllBackwardSliceGraph(
+    llvm::raw_ostream &os, QuerySession &qs,
+    const mlir::query::matcher::BoundOperationsGraphBuilder &builder) {
+
+  const auto &nodes = builder.getNodes();
+  if (nodes.empty()) {
+    os << "The graph is empty.\n";
+    return;
+  }
+
+  // Assign unique IDs to each operation for easy reference
+  std::unordered_map<Operation *, int> nodeIDs;
+  int id = 0;
+  for (const auto &pair : nodes) {
+    nodeIDs[pair.first] = id++;
+  }
+
+  // Print Nodes with their IDs and details
+  os << "Nodes:\n";
+  for (const auto &pair : nodes) {
+    int nodeID = nodeIDs[pair.first];
+    Operation *op = pair.first;
+    os << "  " << nodeID << ": ";
+
+    // Assuming `printMatch` prints operation details; adjust as needed
+    std::string binding = "root";
+    printMatch(os, qs, op, binding);
+    os << "\n";
+  }
+
+  // Print Edges showing dependencies between nodes
+  os << "Edges:\n";
+  for (const auto &pair : nodes) {
+    int parentID = nodeIDs[pair.first];
+    matcher::BoundOperationNode *node = pair.second.get();
+    for (matcher::BoundOperationNode *childNode : node->children) {
+      Operation *childOp = childNode->op;
+      auto it = nodeIDs.find(childOp);
+      if (it != nodeIDs.end()) {
+        int childID = it->second;
+        os << "  " << parentID << " -> " << childID << "\n";
+      }
+    }
+  }
+
+  os << "\n"; // Add a newline for better readability
+}
+
 LogicalResult MatchQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
   Operation *rootOp = qs.getRootOp();
   int matchCount = 0;
@@ -131,22 +183,26 @@ LogicalResult MatchQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
 
   // An extract call is recognized by considering if the matcher has a name.
   // TODO: Consider making the extract more explicit.
-  if (matcher.hasFunctionName()) {
-    auto functionName = matcher.getFunctionName();
-    Operation *function = extractFunction(matches.getOperations(),
-                                          rootOp->getContext(), functionName);
-    os << "\n" << *function << "\n\n";
-    function->erase();
-    return mlir::success();
-  }
+  // if (matcher.hasFunctionName()) {
+  //   auto functionName = matcher.getFunctionName();
+  //   Operation *function = extractFunction(matches.getOperations(),
+  //                                         rootOp->getContext(),
+  //                                         functionName);
+  //   os << "\n" << *function << "\n\n";
+  //   function->erase();
+  //   return mlir::success();
+  // }
 
   os << "\n";
-  for (Operation *op : matches.getOperations()) {
-    os << "Match #" << ++matchCount << ":\n\n";
-    // Placeholder "root" binding for the initial draft.
-    printMatch(os, qs, op, "root");
+  bool printingStyle = false;
+
+  // temporary solution
+  auto matcherName = matcher.getMatcherName();
+  if (matcherName == "getDefinitions" || matcherName == "definedBy") {
+    printingStyle = true;
   }
-  os << matchCount << (matchCount == 1 ? " match.\n\n" : " matches.\n\n");
+
+  printAllBackwardSliceGraph(os, qs, matches);
 
   return mlir::success();
 }

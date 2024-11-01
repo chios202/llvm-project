@@ -33,47 +33,46 @@ public:
 
 private:
   llvm::StringRef getID() const;
-  bool matches(Operation *op, matcher::BoundOperations &Bound,
+  bool matches(Operation *op, matcher::BoundOperationsGraphBuilder &Bound,
                unsigned tempHops) {
     tempStorage.push_back({op, tempHops});
     while (!tempStorage.empty()) {
-      auto [currentOp, lastHops] = tempStorage.pop_back_val();
+      auto [currentOp, remainingHops] = tempStorage.pop_back_val();
 
-      prevOperations.insert(currentOp);
-      if (lastHops == 0) {
+      matcher::BoundOperationNode *currentNode = Bound.addNode(currentOp);
+      if (remainingHops == 0) {
         continue;
       }
 
       for (auto operand : currentOp->getOperands()) {
         if (auto definingOp = operand.getDefiningOp()) {
-          tempStorage.push_back({definingOp, tempHops - 1});
+          Bound.addEdge(currentOp, definingOp);
+
+          if (!ccache.contains(definingOp)) {
+            ccache.insert(definingOp);
+            tempStorage.emplace_back(definingOp, remainingHops - 1);
+          }
         }
       }
-    }
 
-    // Need at least 1 defining op
+      // Need at least 1 defining op
+    }
     return true;
   }
 
 public:
-  bool match(Operation *op, matcher::BoundOperations &Bound) {
-    // ccache.clear();
+  bool match(Operation *op, matcher::BoundOperationsGraphBuilder &Bound) {
+    ccache.clear();
     tempStorage.clear();
-    prevOperations.clear();
-
     if (innerMatcher.match(op) && matches(op, Bound, hops)) {
-      for (auto operations : prevOperations) {
-        Bound.bind(operations);
-      }
       return true;
     }
     return false;
   }
 
 private:
-  // llvm::DenseSet<void *> ccache;
+  llvm::DenseSet<Operation *> ccache;
   llvm::SmallVector<std::pair<Operation *, size_t>, 4> tempStorage;
-  llvm::DenseSet<Operation *> prevOperations;
 
 private:
   matcher::DynMatcher innerMatcher;

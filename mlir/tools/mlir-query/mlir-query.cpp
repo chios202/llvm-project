@@ -49,15 +49,15 @@ int main(int argc, char **argv) {
   matcherRegistry.registerMatcher("hasOpName", static_cast<HasOpName *>(m_Op));
   matcherRegistry.registerMatcher("isConstantOp",
                                   static_cast<IsConstantOp *>(m_Constant));
-  // matcherRegistry.registerMatcher("isNegInfFloat", m_NegInfFloat);
-  // matcherRegistry.registerMatcher("isNegZeroFloat", m_NegZeroFloat);
-  // matcherRegistry.registerMatcher("isNonZero", m_NonZero);
-  // matcherRegistry.registerMatcher("isOne", m_One);
-  // matcherRegistry.registerMatcher("isOneFloat", m_OneFloat);
-  // matcherRegistry.registerMatcher("isPosInfFloat", m_PosInfFloat);
-  // matcherRegistry.registerMatcher("isPosZeroFloat", m_PosZeroFloat);
-  // matcherRegistry.registerMatcher("isZero", m_Zero);
-  // matcherRegistry.registerMatcher("isZeroFloat", m_AnyZeroFloat);
+  matcherRegistry.registerMatcher("isNegInfFloat", m_NegInfFloat);
+  matcherRegistry.registerMatcher("isNegZeroFloat", m_NegZeroFloat);
+  matcherRegistry.registerMatcher("isNonZero", m_NonZero);
+  matcherRegistry.registerMatcher("isOne", m_One);
+  matcherRegistry.registerMatcher("isOneFloat", m_OneFloat);
+  matcherRegistry.registerMatcher("isPosInfFloat", m_PosInfFloat);
+  matcherRegistry.registerMatcher("isPosZeroFloat", m_PosZeroFloat);
+  matcherRegistry.registerMatcher("isZero", m_Zero);
+  matcherRegistry.registerMatcher("isZeroFloat", m_AnyZeroFloat);
 
 #ifdef MLIR_INCLUDE_TESTS
   test::registerTestDialect(dialectRegistry);

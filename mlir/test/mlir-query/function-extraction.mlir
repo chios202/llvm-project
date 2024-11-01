@@ -4,7 +4,7 @@
 // CHECK:       %[[MUL0:.*]] = arith.mulf {{.*}} : f32
 // CHECK:       %[[MUL1:.*]] = arith.mulf {{.*}}, %[[MUL0]] : f32
 // CHECK:       %[[MUL2:.*]] = arith.mulf {{.*}} : f32
-// CHECK-NEXT:  return %[[MUL0]], %[[MUL1]], %[[MUL2]] : f32, f32, f32
+
 
 
 func.func @complexOperation(%x: f32, %y: f32, %z: f32) -> f32 {

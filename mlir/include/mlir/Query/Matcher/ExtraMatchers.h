@@ -26,20 +26,18 @@ namespace detail {
 
 class DefinitionsMatcher {
 public:
-  enum class MatcherType { DefinedBy, GetDefinitions, GetAllDefinitions };
-  DefinitionsMatcher(matcher::DynMatcher &&innerMatcher, unsigned hops,
-                     MatcherType type)
-      : innerMatcher(std::move(innerMatcher)), hops(hops), type(type) {}
+  DefinitionsMatcher(matcher::DynMatcher &&innerMatcher, unsigned hops)
+      : innerMatcher(std::move(innerMatcher)), hops(hops) {}
 
 private:
-  llvm::StringRef getID() const;
   bool matches(Operation *op, matcher::BoundOperationsGraphBuilder &Bound,
                unsigned tempHops) {
     tempStorage.push_back({op, tempHops});
     while (!tempStorage.empty()) {
       auto [currentOp, remainingHops] = tempStorage.pop_back_val();
 
-      matcher::BoundOperationNode *currentNode = Bound.addNode(currentOp);
+      matcher::BoundOperationNode *currentNode =
+          Bound.addNode(currentOp, true, true);
       if (remainingHops == 0) {
         continue;
       }
@@ -47,17 +45,33 @@ private:
       for (auto operand : currentOp->getOperands()) {
         if (auto definingOp = operand.getDefiningOp()) {
           Bound.addEdge(currentOp, definingOp);
-
-          if (!ccache.contains(definingOp)) {
-            ccache.insert(definingOp);
+          if (!ccache.contains(operand)) {
+            ccache.insert(operand);
             tempStorage.emplace_back(definingOp, remainingHops - 1);
+          }
+        } else if (auto blockArg = operand.dyn_cast<BlockArgument>()) {
+          auto *block = blockArg.getOwner();
+
+          if (block->isEntryBlock() &&
+              isa<FunctionOpInterface>(block->getParentOp())) {
+            // Do not proceed further if it's a function block argument
+            continue;
+          }
+
+          Operation *parentOp = blockArg.getOwner()->getParentOp();
+          if (parentOp) {
+            Bound.addEdge(currentOp, parentOp);
+            if (!!ccache.contains(blockArg)) {
+              ccache.insert(blockArg);
+              tempStorage.emplace_back(parentOp, remainingHops - 1);
+            }
           }
         }
       }
 
       // Need at least 1 defining op
     }
-    return true;
+    return ccache.size() >= 2;
   }
 
 public:
@@ -71,42 +85,24 @@ public:
   }
 
 private:
-  llvm::DenseSet<Operation *> ccache;
+  llvm::DenseSet<mlir::Value> ccache;
   llvm::SmallVector<std::pair<Operation *, size_t>, 4> tempStorage;
 
 private:
   matcher::DynMatcher innerMatcher;
   unsigned hops;
-  MatcherType type;
 };
-
-llvm::StringRef DefinitionsMatcher::getID() const {
-  switch (type) {
-  case MatcherType::DefinedBy:
-    return "definedBy";
-  case MatcherType::GetDefinitions:
-    return "getDefinitions";
-  case MatcherType::GetAllDefinitions:
-    return "getAllDefinitions";
-  }
-  llvm_unreachable("Unknown MatcherType");
-}
-
 } // namespace detail
 
 inline detail::DefinitionsMatcher
 definedBy(mlir::query::matcher::DynMatcher innerMatcher) {
-  return detail::DefinitionsMatcher(
-      std::move(innerMatcher), 1,
-      detail::DefinitionsMatcher::MatcherType::DefinedBy);
+  return detail::DefinitionsMatcher(std::move(innerMatcher), 1);
 }
 
 inline detail::DefinitionsMatcher
 getDefinitions(mlir::query::matcher::DynMatcher innerMatcher, unsigned hops) {
   assert(hops > 0 && "hops must be >= 1");
-  return detail::DefinitionsMatcher(
-      std::move(innerMatcher), hops,
-      detail::DefinitionsMatcher::MatcherType::GetDefinitions);
+  return detail::DefinitionsMatcher(std::move(innerMatcher), hops);
 }
 
 } // namespace extramatcher

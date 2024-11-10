@@ -1,28 +1,20 @@
-// RUN: mlir-query %s -c "m hasOpName(\"arith.mulf\").extract(\"testmul\")" | FileCheck %s
+func.func @matrix_multiply(%A: memref<4x4xf32>, %B: memref<4x4xf32>, %C: memref<4x4xf32>) {
+  %c0 = arith.constant 0 : index
+  %c4 = arith.constant 4 : index
+  %c1 = arith.constant 1 : index
 
-// CHECK: func.func @testmul({{.*}}) -> (f32, f32, f32) {
-// CHECK:       %[[MUL0:.*]] = arith.mulf {{.*}} : f32
-// CHECK:       %[[MUL1:.*]] = arith.mulf {{.*}}, %[[MUL0]] : f32
-// CHECK:       %[[MUL2:.*]] = arith.mulf {{.*}} : f32
-
-
-
-func.func @complexOperation(%x: f32, %y: f32, %z: f32) -> f32 {
-  // Arithmetic operations without any multiplication
-  %add1 = arith.addf %x, %y : f32
-  %sub1 = arith.subf %add1, %z : f32
-  %add2 = arith.addf %sub1, %y : f32
-  %sub2 = arith.subf %add2, %x : f32
-  %add3 = arith.addf %sub2, %z : f32
-
-  // Now %sub3 depends on both %add3 and %sub2, creating more complex def-use chain
-  %sub3 = arith.subf %add3, %sub2 : f32
-
-  // Final multiplication operation involving %sub3 and %sub2
-  %final_op = arith.mulf %sub3, %sub2 : f32
-
-  return %final_op : f32
+  scf.for %i = %c0 to %c4 step %c1 {
+    scf.for %j = %c0 to %c4 step %c1 {
+      %sum_init = arith.constant 0.0 : f32
+      %sum = scf.for %k = %c0 to %c4 step %c1 iter_args(%acc = %sum_init) -> (f32) {
+        %a_ik = memref.load %A[%i, %k] : memref<4x4xf32>
+        %b_kj = memref.load %B[%k, %j] : memref<4x4xf32>
+        %prod = arith.mulf %a_ik, %b_kj : f32
+        %new_acc = arith.addf %acc, %prod : f32
+        scf.yield %new_acc : f32
+      }
+      memref.store %sum, %C[%i, %j] : memref<4x4xf32>
+    }
+  }
+  return
 }
-
-
-

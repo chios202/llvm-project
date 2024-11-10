@@ -12,6 +12,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Query/Matcher/MatchFinder.h"
 #include "mlir/Query/QuerySession.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include <unordered_map>
@@ -126,11 +127,40 @@ LogicalResult QuitQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
   return mlir::success();
 }
 
-// Existing includes and namespaces...
+void collectMatchNodes(
+    matcher::BoundOperationNode *node,
+    llvm::SetVector<matcher::BoundOperationNode *> &matchNodes) {
+  if (matchNodes.count(node) > 0) {
+    return;
+  }
+  matchNodes.insert(node);
+  for (auto childNode : node->children) {
+    collectMatchNodes(childNode, matchNodes);
+  }
+}
+
+std::pair<std::string, unsigned> getFilenameAndLine(mlir::Location loc) {
+  if (auto fileLoc = loc.dyn_cast<mlir::FileLineColLoc>()) {
+    return {fileLoc.getFilename().str(), fileLoc.getLine()};
+  } else if (auto nameLoc = loc.dyn_cast<mlir::NameLoc>()) {
+    // Recursively check the child location
+    return getFilenameAndLine(nameLoc.getChildLoc());
+  } else if (auto fusedLoc = loc.dyn_cast<mlir::FusedLoc>()) {
+    // Iterate over all the child locations
+    for (auto subLoc : fusedLoc.getLocations()) {
+      auto result = getFilenameAndLine(subLoc);
+      if (!result.first.empty()) {
+        return result;
+      }
+    }
+  }
+  // For unknown locations or locations without file info
+  return {"", 0};
+}
 
 void printAllBackwardSliceGraph(
     llvm::raw_ostream &os, QuerySession &qs,
-    const mlir::query::matcher::BoundOperationsGraphBuilder &builder) {
+    const matcher::BoundOperationsGraphBuilder &builder) {
 
   const auto &nodes = builder.getNodes();
   if (nodes.empty()) {
@@ -138,42 +168,91 @@ void printAllBackwardSliceGraph(
     return;
   }
 
-  // Assign unique IDs to each operation for easy reference
+  bool anyDetailedPrinting = false;
+  for (const auto &pair : nodes) {
+    if (pair.second->detailedPrinting_) {
+      anyDetailedPrinting = true;
+      break;
+    }
+  }
+
+  unsigned matchesCounter = 0;
+  if (!anyDetailedPrinting) {
+    os << "Operations:\n";
+    for (const auto &pair : nodes) {
+      os << "\n";
+      os << "  Match #" << ++matchesCounter << "\n";
+      printMatch(os, qs, pair.first, "root");
+    }
+    os << matchesCounter << " matches found!\n";
+    return;
+  }
+
   std::unordered_map<Operation *, int> nodeIDs;
   int id = 0;
   for (const auto &pair : nodes) {
     nodeIDs[pair.first] = id++;
   }
 
-  // Print Nodes with their IDs and details
-  os << "Nodes:\n";
+  // Find root nodes (matches)
+  std::vector<matcher::BoundOperationNode *> rootNodes;
   for (const auto &pair : nodes) {
-    int nodeID = nodeIDs[pair.first];
-    Operation *op = pair.first;
-    os << "  " << nodeID << ": ";
-
-    // Assuming `printMatch` prints operation details; adjust as needed
-    std::string binding = "root";
-    printMatch(os, qs, op, binding);
-    os << "\n";
-  }
-
-  // Print Edges showing dependencies between nodes
-  os << "Edges:\n";
-  for (const auto &pair : nodes) {
-    int parentID = nodeIDs[pair.first];
     matcher::BoundOperationNode *node = pair.second.get();
-    for (matcher::BoundOperationNode *childNode : node->children) {
-      Operation *childOp = childNode->op;
-      auto it = nodeIDs.find(childOp);
-      if (it != nodeIDs.end()) {
-        int childID = it->second;
-        os << "  " << parentID << " -> " << childID << "\n";
-      }
+    if (node->highlightText_) {
+      rootNodes.push_back(node);
     }
   }
 
-  os << "\n"; // Add a newline for better readability
+  for (auto rootNode : rootNodes) {
+    os << "\n";
+    os << "  Match #" << ++matchesCounter << "\n";
+
+    llvm::SetVector<matcher::BoundOperationNode *> matchNodes;
+    collectMatchNodes(rootNode, matchNodes);
+    std::vector<matcher::BoundOperationNode *> sortedMatchNodes(
+        matchNodes.begin(), matchNodes.end());
+
+    // **Define and apply the custom comparator**
+    std::sort(
+        sortedMatchNodes.begin(), sortedMatchNodes.end(),
+        [](matcher::BoundOperationNode *a, matcher::BoundOperationNode *b) {
+          // Use the helper function to get filename and line number
+          auto [fileA, lineA] = getFilenameAndLine(a->op->getLoc());
+          auto [fileB, lineB] = getFilenameAndLine(b->op->getLoc());
+
+          // Handle empty filenames (unknown locations)
+          if (fileA.empty() && !fileB.empty()) {
+            return false;
+          }
+          if (!fileA.empty() && fileB.empty()) {
+            return true;
+          }
+          if (fileA != fileB) {
+            return fileA < fileB;
+          }
+          return lineA < lineB;
+        });
+
+    for (auto node : sortedMatchNodes) {
+      int nodeID = nodeIDs[node->op];
+      std::string binding = node->highlightText_ ? "root" : "";
+      os << nodeID << ": ";
+      printMatch(os, qs, node->op, binding);
+    }
+
+    // Print edges
+    os << "Edges:\n";
+    for (auto node : matchNodes) {
+      int parentID = nodeIDs[node->op];
+      for (auto childNode : node->children) {
+        if (matchNodes.count(childNode) > 0) {
+          int childID = nodeIDs[childNode->op];
+          os << "  " << parentID << " ---> " << childID << "\n";
+        }
+      }
+    }
+  }
+  os << "\n" << matchesCounter << " matches found!\n";
 }
 
 LogicalResult MatchQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
@@ -194,14 +273,6 @@ LogicalResult MatchQuery::run(llvm::raw_ostream &os, QuerySession &qs) const {
   // }
 
   os << "\n";
-  bool printingStyle = false;
-
-  // temporary solution
-  auto matcherName = matcher.getMatcherName();
-  if (matcherName == "getDefinitions" || matcherName == "definedBy") {
-    printingStyle = true;
-  }
-
   printAllBackwardSliceGraph(os, qs, matches);
 
   return mlir::success();

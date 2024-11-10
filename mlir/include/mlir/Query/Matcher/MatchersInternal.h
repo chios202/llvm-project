@@ -11,57 +11,101 @@
 
 #include "mlir/IR/Matchers.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
+#include "llvm/ADT/MapVector.h"
+#include <memory>
+#include <stack>
 #include <type_traits>
+#include <unordered_set>
+#include <vector>
 
 namespace mlir::query::matcher {
 
 struct BoundOperationNode {
   Operation *op;
-  std::vector<BoundOperationNode *>
-      parents; // Operations that use this op as an operand
-  std::vector<BoundOperationNode *>
-      children; // Operations that are operands of this op
+  std::vector<BoundOperationNode *> parents;
+  std::vector<BoundOperationNode *> children;
 
-  BoundOperationNode(Operation *operation) : op(operation) {}
+  bool highlightText_;
+  bool detailedPrinting_;
+
+  BoundOperationNode(Operation *operation, bool highlightText = false,
+                     bool detailedPrinting = false)
+      : op(operation), highlightText_(highlightText),
+        detailedPrinting_(detailedPrinting) {}
 };
 
 class BoundOperationsGraphBuilder {
 public:
   // Adds a node to the graph or retrieves it if it already exists
-  BoundOperationNode *addNode(Operation *op) {
+  BoundOperationNode *addNode(Operation *op, bool highlight = false,
+                              bool detailedPrinting = false) {
     auto it = nodes.find(op);
     if (it != nodes.end()) {
       return it->second.get();
     }
-    auto node = std::make_unique<BoundOperationNode>(op);
+    auto node =
+        std::make_unique<BoundOperationNode>(op, highlight, detailedPrinting);
     BoundOperationNode *nodePtr = node.get();
     nodes[op] = std::move(node);
     return nodePtr;
   }
 
-  // Connects parent and child nodes
-  void addEdge(Operation *parentOp, Operation *childOp) {
-    BoundOperationNode *parentNode = addNode(parentOp);
-    BoundOperationNode *childNode = addNode(childOp);
+  bool addEdge(Operation *parentOp, Operation *childOp) {
+    BoundOperationNode *parentNode = addNode(parentOp, false, false);
+    BoundOperationNode *childNode = addNode(childOp, false, false);
+
+    if (createsCycle(childNode, parentNode)) {
+      return false;
+    }
+
     parentNode->children.push_back(childNode);
     childNode->parents.push_back(parentNode);
+    return true;
   }
 
-  // Retrieves a node by Operation*
   BoundOperationNode *getNode(Operation *op) const {
     auto it = nodes.find(op);
     return it != nodes.end() ? it->second.get() : nullptr;
   }
 
-  // Access to all nodes
-  const std::unordered_map<Operation *, std::unique_ptr<BoundOperationNode>> &
+  // Access to all nodes in insertion order
+  const llvm::MapVector<Operation *, std::unique_ptr<BoundOperationNode>> &
   getNodes() const {
     return nodes;
   }
 
 private:
-  // Maps operations to their corresponding nodes
-  std::unordered_map<Operation *, std::unique_ptr<BoundOperationNode>> nodes;
+    llvm::MapVector<Operation *, std::unique_ptr<BoundOperationNode>> nodes;
+
+  // Helper function to detect if adding an edge creates a cycle
+  bool createsCycle(BoundOperationNode *startNode,
+                    BoundOperationNode *targetNode) const {
+    std::unordered_set<BoundOperationNode *> visited;
+    std::stack<BoundOperationNode *> stack;
+    stack.push(startNode);
+
+    while (!stack.empty()) {
+      BoundOperationNode *current = stack.top();
+      stack.pop();
+
+      if (current == targetNode) {
+        // Cycle detected
+        return true;
+      }
+
+      if (visited.find(current) != visited.end()) {
+        continue;
+      }
+      visited.insert(current);
+
+      for (BoundOperationNode *child : current->children) {
+        stack.push(child);
+      }
+    }
+
+    // No cycle detected
+    return false;
+  }
 };
 
 // Type trait to detect if a matcher has a match(Operation*) method
@@ -73,15 +117,15 @@ struct has_simple_match<T, std::void_t<decltype(std::declval<T>().match(
                                std::declval<Operation *>()))>>
     : std::true_type {};
 
-// Type trait to detect if a matcher has a match(Operation*, BoundOperationsGraphBuilder&)
-// method
+// Type trait to detect if a matcher has a match(Operation*,
+// BoundOperationsGraphBuilder&) method
 template <typename T, typename = void>
 struct has_bound_match : std::false_type {};
 
 template <typename T>
-struct has_bound_match<
-    T, std::void_t<decltype(std::declval<T>().match(
-           std::declval<Operation *>(), std::declval<BoundOperationsGraphBuilder &>()))>>
+struct has_bound_match<T, std::void_t<decltype(std::declval<T>().match(
+                              std::declval<Operation *>(),
+                              std::declval<BoundOperationsGraphBuilder &>()))>>
     : std::true_type {};
 
 // Generic interface for matchers on an MLIR operation.

@@ -16,7 +16,7 @@ bool allOfVariadicOperator(Operation *op, SetVector<Operation *> *matchedOps,
                            ArrayRef<DynMatcher> innerMatchers) {
   return llvm::all_of(innerMatchers, [&](const DynMatcher &matcher) {
     if (matchedOps)
-      return matcher.match(op, *matchedOps);
+      return matcher.match(op, matchedOps);
     return matcher.match(op);
   });
 }
@@ -24,7 +24,7 @@ bool anyOfVariadicOperator(Operation *op, SetVector<Operation *> *matchedOps,
                            ArrayRef<DynMatcher> innerMatchers) {
   return llvm::any_of(innerMatchers, [&](const DynMatcher &matcher) {
     if (matchedOps)
-      return matcher.match(op, *matchedOps);
+      return matcher.match(op, matchedOps);
     return matcher.match(op);
   });
 }

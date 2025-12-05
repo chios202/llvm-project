@@ -41,7 +41,7 @@ public:
         dynMatchers.push_back(dynMatcher.value());
     }
     auto result = DynMatcher::constructVariadic(varOp, dynMatchers);
-    return *result;
+    return result;
   }
 
   std::string getTypeAsString() const override {
@@ -82,7 +82,7 @@ std::optional<DynMatcher> VariantMatcher::MatcherOps::constructVariadicOperator(
       return std::nullopt;
     dynMatchers.push_back(*inner);
   }
-  return *DynMatcher::constructVariadic(varOp, dynMatchers);
+  return DynMatcher::constructVariadic(varOp, dynMatchers);
 }
 
 std::optional<DynMatcher> VariantMatcher::getDynMatcher() const {

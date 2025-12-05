@@ -1,0 +1,9 @@
+add_mlir_unittest(MLIRQueryMatcherTests
+  MatcherTests.cpp
+)
+mlir_target_link_libraries(MLIRQueryMatcherTests
+  PRIVATE
+  MLIRQueryLib
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRRegisterAllDialects)

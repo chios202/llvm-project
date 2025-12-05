@@ -48,7 +48,7 @@ public:
         inclusive(inclusive), omitBlockArguments(omitBlockArguments),
         omitUsesFromAbove(omitUsesFromAbove) {}
 
-  bool match(Operation *rootOp, SetVector<Operation *> &backwardSlice) {
+  bool match(Operation *rootOp, SetVector<Operation *> *backwardSlice) {
     BackwardSliceOptions options;
     options.inclusive = inclusive;
     options.omitUsesFromAbove = omitUsesFromAbove;
@@ -58,7 +58,7 @@ public:
   }
 
 private:
-  bool matches(Operation *rootOp, llvm::SetVector<Operation *> &backwardSlice,
+  bool matches(Operation *rootOp, llvm::SetVector<Operation *> *backwardSlice,
                BackwardSliceOptions &options, int64_t maxDepth);
 
 private:
@@ -78,9 +78,9 @@ private:
 
 template <typename Matcher>
 bool BackwardSliceMatcher<Matcher>::matches(
-    Operation *rootOp, llvm::SetVector<Operation *> &backwardSlice,
+    Operation *rootOp, llvm::SetVector<Operation *> *backwardSlice,
     BackwardSliceOptions &options, int64_t maxDepth) {
-  backwardSlice.clear();
+  backwardSlice->clear();
   llvm::DenseMap<Operation *, int64_t> opDepths;
   // Initializing the root op with a depth of 0
   opDepths[rootOp] = 0;
@@ -97,7 +97,7 @@ bool BackwardSliceMatcher<Matcher>::matches(
       if (newDepth > maxDepth)
         continue;
 
-      if (auto definingOp = operand.getDefiningOp()) {
+      if (Operation *definingOp = operand.getDefiningOp()) {
         // Registers the minimum depth
         if (!opDepths.contains(definingOp) || newDepth < opDepths[definingOp])
           opDepths[definingOp] = newDepth;
@@ -113,11 +113,11 @@ bool BackwardSliceMatcher<Matcher>::matches(
     }
     return true;
   };
-  LogicalResult result = getBackwardSlice(rootOp, &backwardSlice, options);
+  LogicalResult result = getBackwardSlice(rootOp, backwardSlice, options);
   assert(result.succeeded() && "expected backward slice to succeed");
   (void)result;
-  return options.inclusive ? backwardSlice.size() > 1
-                           : backwardSlice.size() >= 1;
+  return options.inclusive ? backwardSlice->size() > 1
+                           : backwardSlice->size() >= 1;
 }
 
 /// Computes the backward-slice of all transitive defs reachable from `rootOp`,
@@ -133,8 +133,8 @@ public:
         omitBlockArguments(omitBlockArguments),
         omitUsesFromAbove(omitUsesFromAbove) {}
 
-  bool match(Operation *rootOp, SetVector<Operation *> &backwardSlice) {
-    backwardSlice.clear();
+  bool match(Operation *rootOp, SetVector<Operation *> *backwardSlice) {
+    backwardSlice->clear();
     BackwardSliceOptions options;
     options.inclusive = inclusive;
     options.omitUsesFromAbove = omitUsesFromAbove;
@@ -143,11 +143,11 @@ public:
       options.filter = [&](Operation *subOp) {
         return !filterMatcher.match(subOp);
       };
-      LogicalResult result = getBackwardSlice(rootOp, &backwardSlice, options);
+      LogicalResult result = getBackwardSlice(rootOp, backwardSlice, options);
       assert(result.succeeded() && "expected backward slice to succeed");
       (void)result;
-      return options.inclusive ? backwardSlice.size() > 1
-                               : backwardSlice.size() >= 1;
+      return options.inclusive ? backwardSlice->size() > 1
+                               : backwardSlice->size() >= 1;
     }
     return false;
   }
@@ -170,17 +170,17 @@ public:
       : innerMatcher(std::move(innerMatcher)),
         filterMatcher(std::move(filterMatcher)), inclusive(inclusive) {}
 
-  bool match(Operation *rootOp, SetVector<Operation *> &forwardSlice) {
-    forwardSlice.clear();
+  bool match(Operation *rootOp, SetVector<Operation *> *forwardSlice) {
+    forwardSlice->clear();
     ForwardSliceOptions options;
     options.inclusive = inclusive;
     if (innerMatcher.match(rootOp)) {
       options.filter = [&](Operation *subOp) {
         return !filterMatcher.match(subOp);
       };
-      getForwardSlice(rootOp, &forwardSlice, options);
-      return options.inclusive ? forwardSlice.size() > 1
-                               : forwardSlice.size() >= 1;
+      getForwardSlice(rootOp, forwardSlice, options);
+      return options.inclusive ? forwardSlice->size() > 1
+                               : forwardSlice->size() >= 1;
     }
     return false;
   }

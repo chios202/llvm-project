@@ -57,7 +57,7 @@ struct has_bound_match : std::false_type {};
 template <typename T>
 struct has_bound_match<T, std::void_t<decltype(std::declval<T>().match(
                               std::declval<Operation *>(),
-                              std::declval<SetVector<Operation *> &>()))>>
+                              std::declval<SetVector<Operation *> *>()))>>
     : std::true_type {};
 
 // Generic interface for matchers on an MLIR operation.
@@ -67,7 +67,7 @@ public:
   virtual ~MatcherInterface() = default;
 
   virtual bool match(Operation *op) = 0;
-  virtual bool match(Operation *op, SetVector<Operation *> &matchedOps) = 0;
+  virtual bool match(Operation *op, SetVector<Operation *> *matchedOps) = 0;
 };
 
 // MatcherFnImpl takes a matcher function object and implements
@@ -75,7 +75,7 @@ public:
 template <typename MatcherFn>
 class MatcherFnImpl : public MatcherInterface {
 public:
-  MatcherFnImpl(MatcherFn &matcherFn) : matcherFn(matcherFn) {}
+  MatcherFnImpl(MatcherFn matcherFn) : matcherFn(std::move(matcherFn)) {}
 
   bool match(Operation *op) override {
     if constexpr (has_simple_match<MatcherFn>::value)
@@ -83,7 +83,7 @@ public:
     return false;
   }
 
-  bool match(Operation *op, SetVector<Operation *> &matchedOps) override {
+  bool match(Operation *op, SetVector<Operation *> *matchedOps) override {
     if constexpr (has_bound_match<MatcherFn>::value)
       return matcherFn.match(op, matchedOps);
     return false;
@@ -106,8 +106,8 @@ public:
       : matchers(std::move(matchers)) {}
 
   bool match(Operation *op) override { return Func(op, nullptr, matchers); }
-  bool match(Operation *op, SetVector<Operation *> &matchedOps) override {
-    return Func(op, &matchedOps, matchers);
+  bool match(Operation *op, SetVector<Operation *> *matchedOps) override {
+    return Func(op, matchedOps, matchers);
   }
 
 private:
@@ -122,6 +122,15 @@ public:
   DynMatcher(MatcherInterface *implementation)
       : implementation(implementation) {}
 
+  template <
+      typename Matcher, typename D = std::decay_t<Matcher>,
+      std::enable_if_t<
+          (has_simple_match<D>::value || has_bound_match<D>::value) &&
+              !std::is_same<D, DynMatcher>::value && !std::is_pointer<D>::value,
+          int> = 0>
+  DynMatcher(Matcher &&m)
+      : implementation(new MatcherFnImpl<D>(std::forward<Matcher>(m))) {}
+
   // Construct from a variadic function.
   enum VariadicOperator {
     // Matches operations for which all provided matchers match.
@@ -131,18 +140,15 @@ public:
     AnyOf
   };
 
-  static std::unique_ptr<DynMatcher>
-  constructVariadic(VariadicOperator Op,
-                    std::vector<DynMatcher> innerMatchers) {
-    switch (Op) {
+  static DynMatcher constructVariadic(VariadicOperator varOp,
+                                      std::vector<DynMatcher> innerMatchers) {
+    switch (varOp) {
     case AllOf:
-      return std::make_unique<DynMatcher>(
-          new VariadicMatcher<internal::allOfVariadicOperator>(
-              std::move(innerMatchers)));
+      return DynMatcher(new VariadicMatcher<internal::allOfVariadicOperator>(
+          std::move(innerMatchers)));
     case AnyOf:
-      return std::make_unique<DynMatcher>(
-          new VariadicMatcher<internal::anyOfVariadicOperator>(
-              std::move(innerMatchers)));
+      return DynMatcher(new VariadicMatcher<internal::anyOfVariadicOperator>(
+          std::move(innerMatchers)));
     }
     llvm_unreachable("Invalid Op value.");
   }
@@ -155,7 +161,7 @@ public:
   }
 
   bool match(Operation *op) const { return implementation->match(op); }
-  bool match(Operation *op, SetVector<Operation *> &matchedOps) const {
+  bool match(Operation *op, SetVector<Operation *> *matchedOps) const {
     return implementation->match(op, matchedOps);
   }
 
@@ -168,6 +174,32 @@ private:
   std::string functionName;
 };
 
+class Matcher {
+public:
+  explicit Matcher(MatcherInterface *impl) : implementation(DynMatcher(impl)) {}
+  explicit Matcher(DynMatcher impl) : implementation(std::move(impl)) {}
+
+  template <
+      typename M, typename D = std::decay_t<M>,
+      std::enable_if_t<
+          (has_simple_match<D>::value || has_bound_match<D>::value) &&
+              !std::is_same<D, DynMatcher>::value &&
+              !std::is_same<D, Matcher>::value && !std::is_pointer<D>::value,
+          int> = 0>
+  Matcher(M &&m) : implementation(new MatcherFnImpl<D>(std::forward<M>(m))) {}
+
+  operator DynMatcher() const & { return implementation; }
+  operator DynMatcher() && { return std::move(implementation); }
+
+  bool match(Operation *op) const { return implementation.match(op); }
+  bool match(Operation *op, SetVector<Operation *> *matchedOps) const {
+    return implementation.match(op, matchedOps);
+  }
+
+private:
+  DynMatcher implementation;
+};
+
 // VariadicOperatorMatcher related types.
 template <typename... Ps>
 class VariadicOperatorMatcher {
@@ -175,12 +207,12 @@ public:
   VariadicOperatorMatcher(DynMatcher::VariadicOperator varOp, Ps &&...params)
       : varOp(varOp), params(std::forward<Ps>(params)...) {}
 
-  operator std::unique_ptr<DynMatcher>() const & {
+  operator DynMatcher() const & {
     return DynMatcher::constructVariadic(
         varOp, getMatchers(std::index_sequence_for<Ps...>()));
   }
 
-  operator std::unique_ptr<DynMatcher>() && {
+  operator DynMatcher() && {
     return DynMatcher::constructVariadic(
         varOp, std::move(*this).getMatchers(std::index_sequence_for<Ps...>()));
   }
